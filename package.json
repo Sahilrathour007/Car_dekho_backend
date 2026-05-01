@@ -1,0 +1,14 @@
+{
+  "name": "cardekho-finance-first-backend",
+  "version": "1.0.0",
+  "description": "Finance-first CarDekho mock backend: affordability, matching, pricing, trust, intent, swap, and cohort export.",
+  "main": "server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
