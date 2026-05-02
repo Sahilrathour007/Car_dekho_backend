@@ -141,146 +141,32 @@ function emiForLoan(principal, annualRate = 0.105, months = 72) {
 }
 
 // ─── Business Engines ─────────────────────────────────────────────────────────
-function clamp(value, min, max) {
-  return Math.max(min, Math.min(max, value));
-}
-
-function bureauScoreFromInput(input) {
-  const explicit = Number(input.bureauScore || input.creditScore || input.cibilScore);
-  if (explicit >= 300 && explicit <= 900) return explicit;
-
-  const range = String(input.creditRange || "650-750");
-  if (range.includes("750")) return 775;
-  if (range.includes("650")) return 700;
-  if (range.includes("550")) return 610;
-  return 680;
-}
-
-function riskProfileEngine(input = {}) {
-  const income = Math.max(0, Number(input.monthlyIncome || 55000));
-  const existingEmis = Math.max(0, Number(input.existingEmis || 0));
-  const requestedBudget = Math.max(3500, Number(input.monthlyBudget || 7800));
-  const bureauScore = bureauScoreFromInput(input);
-  const age = clamp(Number(input.age || 31), 21, 65);
-  const jobStabilityMonths = clamp(Number(input.jobStabilityMonths || input.jobTenureMonths || 24), 0, 240);
-  const employerCategory = input.employerCategory || input.employmentType || "salaried";
-  const city = input.city || "Delhi NCR";
-  const cityRisk = /tier\s*2|jaipur|lucknow|indore|bhopal|patna|kanpur/i.test(city) ? 0.95 : 1;
-
-  const bureauFactor = clamp((bureauScore - 600) / 250, 0.35, 1.18);
-  const ageFactor = age < 24 ? 0.88 : age > 55 ? 0.9 : 1;
-  const stabilityFactor = jobStabilityMonths < 6 ? 0.82 : jobStabilityMonths < 18 ? 0.94 : 1.04;
-  const employerFactor = /gov|psu|mnc|listed/i.test(employerCategory) ? 1.06 : /self|gig|freelance/i.test(employerCategory) ? 0.9 : 1;
-  const obligationRatio = income > 0 ? existingEmis / income : 1;
-  const riskScore = clamp(
-    Math.round((bureauFactor * 42 + stabilityFactor * 20 + employerFactor * 16 + ageFactor * 10 + cityRisk * 12 - obligationRatio * 35) * 10),
-    300,
-    900
-  );
-
-  const foirLimit = riskScore >= 760 ? 0.46 : riskScore >= 700 ? 0.4 : riskScore >= 640 ? 0.34 : 0.28;
-  const disposableEmi = Math.max(2500, Math.round(income * foirLimit - existingEmis));
-  const riskCategory = riskScore >= 760 ? "LOW" : riskScore >= 690 ? "MEDIUM" : "HIGH";
-
-  return {
-    city,
-    income,
-    existingEmis,
-    requestedBudget,
-    bureauScore,
-    age,
-    jobStabilityMonths,
-    employerCategory,
-    foirLimit,
-    disposableEmi,
-    riskScore,
-    riskCategory,
-    signals: {
-      bureau: bureauScore >= 740 ? "strong" : bureauScore >= 680 ? "moderate" : "thin_or_risky",
-      stability: jobStabilityMonths >= 18 ? "stable" : "needs_more_proof",
-      obligations: obligationRatio <= 0.18 ? "low" : obligationRatio <= 0.32 ? "manageable" : "high",
-      cityRisk: cityRisk === 1 ? "standard" : "watch"
-    }
-  };
-}
-
-const lenderModels = [
-  { lender: "Rupyy Prime NBFC", appetite: 1.02, baseRate: 10.4, tenureMonths: 72, minRisk: 610, riskBuffer: 0.03 },
-  { lender: "Partner Bank Select", appetite: 0.94, baseRate: 10.9, tenureMonths: 72, minRisk: 675, riskBuffer: 0.08 },
-  { lender: "Fast Approval NBFC", appetite: 0.86, baseRate: 12.2, tenureMonths: 60, minRisk: 585, riskBuffer: 0.13 },
-  { lender: "Used Car Credit Co", appetite: 0.78, baseRate: 13.5, tenureMonths: 60, minRisk: 560, riskBuffer: 0.18 }
-];
-
-function probabilityForAmount(amount, maxAmount, riskScore, lenderBuffer = 0) {
-  if (amount <= 0 || maxAmount <= 0) return 5;
-  const utilization = amount / maxAmount;
-  const riskBoost = (riskScore - 650) / 5;
-  return clamp(Math.round(96 - utilization * 42 + riskBoost - lenderBuffer * 100), 12, 96);
-}
-
-function lenderSimulationEngine(input, profile = riskProfileEngine(input)) {
-  return lenderModels.map(model => {
-    const riskHaircut = clamp((profile.riskScore - model.minRisk) / 650, -0.22, 0.18);
-    const buyerAnchoredEmi = Math.min(profile.disposableEmi, profile.requestedBudget * 1.35);
-    const approvalEmi = Math.max(2500, Math.round(buyerAnchoredEmi * model.appetite * (1 + riskHaircut)));
-    const interestRate = Number((model.baseRate + clamp((700 - profile.riskScore) / 80, -0.7, 2.4)).toFixed(2));
-    const approvedAmount = pmtLoanAmount(approvalEmi, interestRate / 100, model.tenureMonths);
-    const approvalProbability = probabilityForAmount(approvedAmount, approvedAmount * (1 + model.riskBuffer), profile.riskScore, model.riskBuffer);
-    return {
-      lender: model.lender,
-      interestRate,
-      tenureMonths: model.tenureMonths,
-      approvedAmount,
-      emi: approvalEmi,
-      approvalProbability,
-      decision: profile.riskScore >= model.minRisk ? "LIKELY" : "CONDITIONAL",
-      reason: profile.riskScore >= model.minRisk ? "Profile fits lender policy" : "Needs stronger bureau or income proof",
-      softCheck: true
-    };
-  }).sort((a, b) => b.approvalProbability - a.approvalProbability);
-}
-
 function affordabilityEngine(input) {
-  const profile = riskProfileEngine(input);
-  const offers = lenderSimulationEngine(input, profile);
-  const amounts = offers.map(offer => offer.approvedAmount).sort((a, b) => a - b);
-  const emis = offers.map(offer => offer.emi).sort((a, b) => a - b);
-  const worstCase = amounts[0] || 0;
-  const bestCase = amounts[amounts.length - 1] || 0;
-  const safeMax = Math.min(profile.requestedBudget + 600, emis[emis.length - 1] || profile.requestedBudget);
-  const safeMin = Math.max(3000, Math.min(safeMax - 500, emis[0] || 3500));
-  const targetAmount = pmtLoanAmount(profile.requestedBudget);
-  const approvalProbability = probabilityForAmount(targetAmount, bestCase, profile.riskScore);
-  const confidenceScore = clamp(
-    Math.round(58 + offers.filter(o => o.decision === "LIKELY").length * 8 + (profile.bureauScore - 650) / 8 + Math.min(profile.jobStabilityMonths, 36) / 3),
-    35,
-    92
-  );
-  const confidence = confidenceScore >= 76 ? "HIGH" : confidenceScore >= 58 ? "MEDIUM" : "LOW";
-  const tokenSeed = `${input.userId || "anon"}:${profile.riskScore}:${bestCase}:${Date.now()}`;
-  const lockToken = `CD-${crypto.createHash("sha1").update(tokenSeed).digest("hex").slice(0, 8).toUpperCase()}`;
+  const income = Number(input.monthlyIncome || 55000);
+  const existingEmis = Number(input.existingEmis || 0);
+  const requestedBudget = Number(input.monthlyBudget || 7800);
+  const creditRange = input.creditRange || "650-750";
+  const city = input.city || "Delhi NCR";
+
+  const creditMultiplier = creditRange.includes("750") ? 1.12 : creditRange.includes("650") ? 1 : 0.82;
+  const safeEmiCap = Math.max(3500, Math.round((income * 0.3 - existingEmis) * creditMultiplier));
+  const targetBudget = Math.max(3500, requestedBudget);
+  const safeMax = Math.max(3500, Math.min(safeEmiCap, targetBudget + 300));
+  const safeMin = Math.max(3000, Math.min(safeMax - 500, targetBudget - 600));
+  const maxLoan = pmtLoanAmount(safeMax);
+  const riskCategory = safeEmiCap >= requestedBudget ? "LOW" : safeEmiCap >= requestedBudget * 0.85 ? "MEDIUM" : "HIGH";
 
   return {
     userId: input.userId || crypto.randomUUID(),
-    city: profile.city,
-    monthlyIncome: profile.income,
-    existingEmis: profile.existingEmis,
-    requestedBudget: profile.requestedBudget,
-    bureauScore: profile.bureauScore,
-    riskProfile: profile,
+    city,
+    monthlyIncome: income,
+    existingEmis,
+    requestedBudget,
+    creditRange,
     safeEmiRange: { min: safeMin, max: safeMax },
-    loanRange: { min: worstCase, max: bestCase },
-    maxLoan: bestCase,
-    bestCase,
-    worstCase,
-    approvalProbability,
-    confidence,
-    confidenceScore,
-    riskCategory: profile.riskCategory,
-    offers,
-    lockToken,
-    tokenValidHours: 24,
-    message: `Estimated approval range: Rs ${worstCase.toLocaleString("en-IN")}-${bestCase.toLocaleString("en-IN")} with ${confidence.toLowerCase()} confidence.`
+    maxLoan,
+    riskCategory,
+    message: `You can safely shop around Rs ${safeMin.toLocaleString("en-IN")}-${safeMax.toLocaleString("en-IN")}/month.`
   };
 }
 
@@ -357,19 +243,165 @@ function inventoryMatchingEngine(input) {
 
 function loanOrchestrationEngine(input) {
   const affordability = affordabilityEngine(input);
+  const offers = [
+    { lender: "Rupyy Prime NBFC", interestRate: 10.25, tenureMonths: 72 },
+    { lender: "Partner Bank", interestRate: 11.1, tenureMonths: 72 },
+    { lender: "Fast Approval NBFC", interestRate: 12.4, tenureMonths: 60 }
+  ].map(offer => ({
+    ...offer,
+    approvedAmount: affordability.maxLoan,
+    emi: emiForLoan(affordability.maxLoan, offer.interestRate / 100, offer.tenureMonths),
+    softCheck: true
+  }));
+  return { affordability, offers };
+}
+
+// ─── Upgrade Inventory (New Cars for Exchange) ────────────────────────────────
+const upgradeInventory = [
+  {
+    id: "upg-i20-2024",
+    name: "Hyundai i20 Magna",
+    variant: "1.2 Petrol MT",
+    year: 2024,
+    fuel: "Petrol",
+    transmission: "Manual",
+    exShowroom: 750000,
+    onRoad: 820000,
+    deliveryDays: { min: 7, max: 10 },
+    intentTags: ["upgrade", "popular", "hatchback"]
+  },
+  {
+    id: "upg-baleno-2024",
+    name: "Maruti Baleno Delta",
+    variant: "1.2 Petrol MT",
+    year: 2024,
+    fuel: "Petrol",
+    transmission: "Manual",
+    exShowroom: 700000,
+    onRoad: 765000,
+    deliveryDays: { min: 3, max: 5 },
+    intentTags: ["upgrade", "lowest_emi", "hatchback"]
+  },
+  {
+    id: "upg-altroz-2024",
+    name: "Tata Altroz XE",
+    variant: "1.2 Petrol MT",
+    year: 2024,
+    fuel: "Petrol",
+    transmission: "Manual",
+    exShowroom: 660000,
+    onRoad: 720000,
+    deliveryDays: { min: 5, max: 7 },
+    intentTags: ["upgrade", "value", "hatchback"]
+  },
+  {
+    id: "upg-nexon-2024",
+    name: "Tata Nexon Smart",
+    variant: "1.2 Petrol MT",
+    year: 2024,
+    fuel: "Petrol",
+    transmission: "Manual",
+    exShowroom: 870000,
+    onRoad: 950000,
+    deliveryDays: { min: 10, max: 14 },
+    intentTags: ["upgrade", "suv", "stretch"]
+  }
+];
+
+// ─── Old Car Valuation Engine ─────────────────────────────────────────────────
+function valuateOldCar(input) {
+  const make = (input.make || "").toLowerCase();
+  const model = (input.model || "").toLowerCase();
+  const year = Number(input.year || 2020);
+  const km = Number(input.km || 40000);
+  const condition = (input.condition || "good").toLowerCase();
+  const currentYear = new Date().getFullYear();
+  const age = currentYear - year;
+
+  // Base values by brand tier (₹)
+  const baseValues = {
+    "maruti": 420000, "hyundai": 450000, "tata": 430000,
+    "honda": 500000, "toyota": 520000, "mahindra": 470000,
+    "kia": 480000, "volkswagen": 490000
+  };
+  let base = baseValues[make] || 440000;
+
+  // Model-specific adjustments
+  if (model.includes("swift") || model.includes("baleno")) base = 420000;
+  if (model.includes("i20") || model.includes("verna")) base = 480000;
+  if (model.includes("nexon") || model.includes("punch")) base = 500000;
+  if (model.includes("city") || model.includes("civic")) base = 560000;
+
+  // Depreciation: ~15% yr1, ~12% yr2, ~10% yr3-5, ~8% yr6+
+  let depreciation = 0;
+  if (age <= 1) depreciation = 0.15;
+  else if (age === 2) depreciation = 0.15 + 0.12;
+  else if (age <= 5) depreciation = 0.15 + 0.12 + (age - 2) * 0.10;
+  else depreciation = 0.15 + 0.12 + 0.30 + (age - 5) * 0.08;
+  depreciation = Math.min(depreciation, 0.70);
+
+  let value = base * (1 - depreciation);
+
+  // KM adjustment: deduct ₹1/km over 10k baseline per year
+  const expectedKm = age * 10000;
+  if (km > expectedKm) value -= (km - expectedKm) * 0.8;
+
+  // Condition multiplier
+  const condMap = { excellent: 1.08, good: 1.0, average: 0.88, poor: 0.72 };
+  const condKey = Object.keys(condMap).find(k => condition.includes(k)) || "good";
+  value *= condMap[condKey];
+
+  value = Math.round(value / 1000) * 1000;
+  const rangeMin = Math.round(value * 0.94 / 1000) * 1000;
+  const rangeMax = Math.round(value * 1.06 / 1000) * 1000;
+
+  // Sell time estimate based on condition + age
+  let sellDays;
+  if (condKey === "excellent" && age <= 3) sellDays = { min: 4, max: 7 };
+  else if (condKey === "good" && age <= 5) sellDays = { min: 7, max: 12 };
+  else if (condKey === "average") sellDays = { min: 14, max: 21 };
+  else sellDays = { min: 20, max: 35 };
+
+  const demandLevel = (condKey === "excellent" || (condKey === "good" && age <= 4)) ? "HIGH"
+    : condKey === "good" ? "MEDIUM" : "LOW";
+
+  return { rangeMin, rangeMax, midValue: value, sellDays, demandLevel, age, condKey };
+}
+
+function upgradeEngine(input) {
+  const valuation = valuateOldCar(input);
+  const outstandingLoan = Number(input.outstandingLoan || 0);
+  const currentEmi = Number(input.currentEmi || 0);
+  const netTradeIn = Math.max(0, valuation.midValue - outstandingLoan);
+
+  const upgradeCars = upgradeInventory.map(car => {
+    const loanNeeded = Math.max(0, car.onRoad - netTradeIn);
+    const newEmi = emiForLoan(loanNeeded);
+    const netEmiChange = newEmi - currentEmi;
+    const rto = Math.round(car.exShowroom * 0.035);
+    const insurance = 12000;
+    const processing = 3500;
+    return {
+      ...car,
+      loanNeeded,
+      newEmi,
+      netEmiChange,
+      rto, insurance, processing,
+      totalOnRoad: car.exShowroom + rto + insurance + processing,
+      deliveryDate: {
+        earliest: `Day ${car.deliveryDays.min}`,
+        latest: `Day ${car.deliveryDays.max}`
+      }
+    };
+  });
+
   return {
-    affordability,
-    offers: affordability.offers,
-    approvalCurve: [
-      { amount: affordability.bestCase, probability: affordability.approvalProbability },
-      { amount: Math.round(affordability.bestCase * 0.9), probability: clamp(affordability.approvalProbability + 10, 1, 96) },
-      { amount: Math.round(affordability.bestCase * 0.8), probability: clamp(affordability.approvalProbability + 18, 1, 98) }
-    ],
-    capture: {
-      lockToken: affordability.lockToken,
-      validHours: affordability.tokenValidHours,
-      nextStep: "Lock rate and route buyer to matching inventory before dealer contact"
-    }
+    valuation,
+    netTradeIn,
+    outstandingLoan,
+    currentEmi,
+    pickupTimeline: { min: 0, max: 3 },
+    upgradeCars
   };
 }
 
@@ -402,9 +434,6 @@ function normalizeEvent(raw) {
     monthly_budget: raw.monthlyBudget || raw.monthly_budget || "",
     safe_emi_min: raw.safeEmiMin || raw.safe_emi_min || "",
     safe_emi_max: raw.safeEmiMax || raw.safe_emi_max || "",
-    approval_probability: raw.approvalProbability || raw.approval_probability || "",
-    confidence: raw.confidence || "",
-    lock_token: raw.lockToken || raw.lock_token || "",
     car_id: raw.carId || raw.car_id || "",
     car_name: raw.carName || raw.car_name || "",
     fit_status: raw.fitStatus || raw.fit_status || "",
@@ -549,6 +578,18 @@ async function route(req, res) {
 
     if (req.method === "POST" && pathname === "/api/loan/precheck") {
       return send(res, 200, loanOrchestrationEngine(await readBody(req)));
+    }
+
+    if (req.method === "POST" && pathname === "/api/upgrade/valuate") {
+      return send(res, 200, valuateOldCar(await readBody(req)));
+    }
+
+    if (req.method === "POST" && pathname === "/api/upgrade/calculate") {
+      return send(res, 200, upgradeEngine(await readBody(req)));
+    }
+
+    if (req.method === "GET" && pathname === "/api/upgrade/inventory") {
+      return send(res, 200, { cars: upgradeInventory });
     }
 
     if (req.method === "POST" && pathname === "/api/swap") {
