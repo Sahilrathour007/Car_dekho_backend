@@ -254,7 +254,6 @@ function loanOrchestrationEngine(input) {
     softCheck: true
   }));
   return { affordability, offers };
-<<<<<<< HEAD
 }
 
 // ─── Upgrade Inventory (New Cars for Exchange) ────────────────────────────────
@@ -404,8 +403,6 @@ function upgradeEngine(input) {
     pickupTimeline: { min: 0, max: 3 },
     upgradeCars
   };
-=======
->>>>>>> 70365a8b9863555a43397b38f83e71907e1d5c4e
 }
 
 function swapEngine(input) {
