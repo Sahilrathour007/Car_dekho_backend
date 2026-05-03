@@ -104,7 +104,75 @@ const inventory = [
   }
 ];
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+// ─── Urgent Inventory (same-city RTO, zero challans, loan-free, RC-ready) ─────
+const urgentInventory = [
+  {
+    id: "urg-swift-jaipur",
+    name: "Maruti Swift VXI",
+    year: 2020,
+    fuel: "Petrol",
+    transmission: "Manual",
+    km: 28500,
+    price: 465000,
+    baseEmi: 6950,
+    downPaymentEmi: 6250,
+    city: "Jaipur",
+    rto: "Jaipur",
+    deliveryWindow: "today",
+    deliveryLabel: "⚡ Today",
+    urgentEligible: true,
+    rcFiledWithin: "24 hrs",
+    challanStatus: "clear",
+    hypothecation: "none",
+    ownerCount: 1,
+    trustScore: 94,
+    intentTags: ["urgent", "emi_sensitive", "lowest_emi"]
+  },
+  {
+    id: "urg-i20-jaipur",
+    name: "Hyundai i20 Sportz",
+    year: 2019,
+    fuel: "Petrol",
+    transmission: "Manual",
+    km: 32000,
+    price: 510000,
+    baseEmi: 7800,
+    downPaymentEmi: 6900,
+    city: "Jaipur",
+    rto: "Jaipur",
+    deliveryWindow: "48hrs",
+    deliveryLabel: "📅 48 hrs",
+    urgentEligible: true,
+    rcFiledWithin: "24 hrs",
+    challanStatus: "clear",
+    hypothecation: "none",
+    ownerCount: 1,
+    trustScore: 91,
+    intentTags: ["urgent", "first_time", "best_value"]
+  },
+  {
+    id: "urg-city-jaipur",
+    name: "Honda City VX",
+    year: 2018,
+    fuel: "Petrol",
+    transmission: "Automatic",
+    km: 39800,
+    price: 585000,
+    baseEmi: 8700,
+    downPaymentEmi: 7650,
+    city: "Jaipur",
+    rto: "Jaipur",
+    deliveryWindow: "week",
+    deliveryLabel: "📆 This week",
+    urgentEligible: true,
+    rcFiledWithin: "24 hrs",
+    challanStatus: "clear",
+    hypothecation: "none",
+    ownerCount: 1,
+    trustScore: 86,
+    intentTags: ["urgent", "automatic", "upgrade"]
+  }
+];
 function send(res, status, data) {
   res.writeHead(status, {
     "Content-Type": "application/json; charset=utf-8",
@@ -441,6 +509,9 @@ function normalizeEvent(raw) {
     delivery_hours: raw.deliveryHours || raw.delivery_hours || "",
     trust_score: raw.trustScore || raw.trust_score || "",
     dealer_reliability: raw.dealerReliability || raw.dealer_reliability || "",
+    urgent_timeline: raw.urgentTimeline || raw.urgent_timeline || "",
+    urgent_exchange: raw.urgentExchange || raw.urgent_exchange || "",
+    urgent_token: raw.urgentToken || raw.urgent_token || "",
     cta: raw.cta || "",
     page: raw.page || "",
     source: "render_backend"
@@ -514,6 +585,8 @@ function buildCohortSummary(events) {
       eligibility_checks: 0,
       car_clicks: 0,
       dealer_gates: 0,
+      urgent_opens: 0,
+      urgent_reserves: 0,
       buyer_types: {},
       fit_statuses: {}
     };
@@ -525,6 +598,8 @@ function buildCohortSummary(events) {
     if (e.event_type === "eligibility_check") c.eligibility_checks++;
     if (e.event_type === "car_click") c.car_clicks++;
     if (e.event_type === "dealer_gate") c.dealer_gates++;
+    if (e.event_type === "urgent_drawer_open") c.urgent_opens++;
+    if (e.event_type === "urgent_reserve_confirmed") c.urgent_reserves++;
 
     // Segmentation
     if (e.buyer_type) c.buyer_types[e.buyer_type] = (c.buyer_types[e.buyer_type] || 0) + 1;
@@ -536,6 +611,7 @@ function buildCohortSummary(events) {
     unique_users: c.users.size,
     eligibility_rate: c.page_views > 0 ? (c.eligibility_checks / c.page_views * 100).toFixed(1) + "%" : "N/A",
     dealer_conversion_rate: c.eligibility_checks > 0 ? (c.dealer_gates / c.eligibility_checks * 100).toFixed(1) + "%" : "N/A",
+    urgent_conversion_rate: c.urgent_opens > 0 ? (c.urgent_reserves / c.urgent_opens * 100).toFixed(1) + "%" : "N/A",
     users: undefined // remove Set from JSON output
   }));
 }
@@ -594,6 +670,68 @@ async function route(req, res) {
 
     if (req.method === "POST" && pathname === "/api/swap") {
       return send(res, 200, swapEngine(await readBody(req)));
+    }
+
+    if (req.method === "GET" && pathname === "/api/urgent/inventory") {
+      const city = url.searchParams.get("city") || "";
+      const timeline = url.searchParams.get("timeline") || ""; // today | 48hrs | week
+      const budget = Number(url.searchParams.get("budget") || 0);
+
+      // Priority: today → 48hrs → week (each includes prior tiers)
+      const timelineOrder = ["today", "48hrs", "week"];
+      const tIdx = timelineOrder.indexOf(timeline);
+
+      let cars = urgentInventory.filter(car => {
+        const cityMatch = !city || car.city.toLowerCase().includes(city.toLowerCase());
+        const tCarIdx = timelineOrder.indexOf(car.deliveryWindow);
+        const timelineMatch = !timeline || tCarIdx <= (tIdx >= 0 ? tIdx : 2);
+        const budgetMatch = !budget || car.baseEmi <= budget * 1.25; // show up to 25% over
+        return cityMatch && timelineMatch && budgetMatch;
+      });
+
+      cars = cars.map(car => ({
+        ...car,
+        pricing: pricingEngine(car),
+        trust: trustEngine(car)
+      }));
+
+      return send(res, 200, {
+        cars,
+        total: cars.length,
+        filterApplied: { city, timeline, budget },
+        rcNote: "Physical possession: same day. RC updated in your name: 7–21 working days via Parivahan. CarDekho handles all paperwork.",
+        eligibilityCriteria: ["Same-city RTO", "Zero pending challans", "No hypothecation", "Loan-free or NOC cleared", "Parivahan digital RC available"]
+      });
+    }
+
+    if (req.method === "POST" && pathname === "/api/urgent/reserve") {
+      const body = await readBody(req);
+      const token = "URG-" + crypto.randomUUID().slice(0, 8).toUpperCase();
+      const raw = {
+        ...body,
+        eventType: "urgent_reserve",
+        cta: "urgent_reserve_api"
+      };
+      await handleEvent(raw);
+      return send(res, 200, {
+        ok: true,
+        token,
+        message: "Slot held for 4 hours. Dealer will call within 1 hour.",
+        bookingAmount: 5000,
+        refundPolicy: "Full refund if delivery not met by committed date.",
+        rcNote: "Forms will be signed on delivery day. Parivahan filing within 24 hours."
+      });
+    }
+
+    if (req.method === "POST" && pathname === "/api/urgent/valuate") {
+      const body = await readBody(req);
+      // Reuse existing valuation engine for exchange cars
+      const valuation = valuateOldCar(body);
+      return send(res, 200, {
+        ...valuation,
+        pickupNote: "Old car pickup scheduled same day as new car delivery.",
+        rcHandled: "CarDekho handles RC transfer for both buyer and seller."
+      });
     }
 
     if (req.method === "POST" && pathname === "/api/events") {
